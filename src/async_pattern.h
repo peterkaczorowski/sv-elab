@@ -22,10 +22,18 @@ struct TimingPatternInterpretor
 			SynthesisSettings &settings, DiagnosticIssuer &issuer, EvalContext &eval)
 		: settings(settings), issuer(issuer), eval(eval) {};
 
+	struct AsyncTerm
+	{
+		VariableBit trigger;
+		bool polarity;
+	};
+
+	// The branch is taken when any of the terms is active. Usually there is
+	// a single term; more arise from conditions like `if (!rst_a || !rst_b)`
+	// where each operand matches its own edge event.
 	struct AsyncBranch
 	{
-		const VariableBit trigger;
-		bool polarity;
+		std::vector<AsyncTerm> terms;
 		const ast::Statement &body;
 	};
 

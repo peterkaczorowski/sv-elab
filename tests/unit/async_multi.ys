@@ -1,0 +1,186 @@
+# Asynchronous load conditions joining several edge events, e.g.
+# `if (!rst_a || !rst_b)`. Each case is checked against a gold model
+# which combines the events into a single reset signal by hand.
+
+read_slang <<EOF
+module amulti01_gate(input logic clk, input logic rst_a, input logic rst_b,
+					input logic [3:0] d, output logic [3:0] q);
+	always @(posedge clk or negedge rst_a or negedge rst_b) begin
+		if (!rst_a || !rst_b)
+			q <= 4'hb;
+		else
+			q <= d + 1;
+	end
+endmodule
+EOF
+read_verilog <<EOF
+module amulti01_gold(input clk, input rst_a, input rst_b,
+					input [3:0] d, output reg [3:0] q);
+	wire rst = !rst_a || !rst_b;
+	always @(posedge clk or posedge rst)
+		if (rst)
+			q <= 4'hb;
+		else
+			q <= d + 1;
+endmodule
+EOF
+proc
+async2sync
+equiv_make amulti01_gold amulti01_gate amulti01_equiv
+equiv_induct amulti01_equiv
+equiv_status -assert
+
+# De Morgan form, plus a synchronous enable kept in the else branch
+design -reset
+read_slang <<EOF
+module amulti02_gate(input logic clk, input logic rst_a, input logic rst_b,
+					input logic en, output logic q);
+	always @(posedge clk or negedge rst_a or negedge rst_b) begin
+		if (!(rst_a && rst_b))
+			q <= 1;
+		else if (en)
+			q <= 0;
+	end
+endmodule
+EOF
+read_verilog <<EOF
+module amulti02_gold(input clk, input rst_a, input rst_b,
+					input en, output reg q);
+	wire rst = !(rst_a && rst_b);
+	always @(posedge clk or posedge rst)
+		if (rst)
+			q <= 1;
+		else if (en)
+			q <= 0;
+endmodule
+EOF
+proc
+async2sync
+equiv_make amulti02_gold amulti02_gate amulti02_equiv
+equiv_induct amulti02_equiv
+equiv_status -assert
+
+# Three events of mixed polarity, single-bit bitwise operators, event
+# order unrelated to term order, clock listed last
+design -reset
+read_slang <<EOF
+module amulti03_gate(input logic clk, input logic ra, input logic rb, input logic rc,
+					input logic [1:0] d, output logic [1:0] q);
+	always_ff @(negedge rc, posedge ra, posedge rb, posedge clk) begin
+		if (ra | (rb || ~rc))
+			q <= 2'b10;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+read_verilog <<EOF
+module amulti03_gold(input clk, input ra, input rb, input rc,
+					input [1:0] d, output reg [1:0] q);
+	wire rst = ra | rb | ~rc;
+	always @(posedge clk or posedge rst)
+		if (rst)
+			q <= 2'b10;
+		else
+			q <= d;
+endmodule
+EOF
+proc
+async2sync
+equiv_make amulti03_gold amulti03_gate amulti03_equiv
+equiv_induct amulti03_equiv
+equiv_status -assert
+
+# Comparison forms of the terms
+design -reset
+read_slang <<EOF
+module amulti04_gate(input logic clk, input logic rst_a, input logic rst_b,
+					input logic d, output logic q);
+	always @(posedge clk or negedge rst_a or posedge rst_b) begin
+		if (rst_a == 1'b0 || rst_b != 1'b0)
+			q <= 0;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+read_verilog <<EOF
+module amulti04_gold(input clk, input rst_a, input rst_b,
+					input d, output reg q);
+	wire rst = !rst_a || rst_b;
+	always @(posedge clk or posedge rst)
+		if (rst)
+			q <= 0;
+		else
+			q <= d;
+endmodule
+EOF
+proc
+async2sync
+equiv_make amulti04_gold amulti04_gate amulti04_equiv
+equiv_induct amulti04_equiv
+equiv_status -assert
+
+# A term without its own event is still rejected
+design -reset
+logger -expect error ".*condition cannot be matched to any signal from the event list.*" 1
+read_slang <<EOF
+module amulti05(input logic clk, input logic rst_a, input logic other,
+				input logic d, output logic q);
+	always @(posedge clk or negedge rst_a) begin
+		if (!rst_a || other)
+			q <= 0;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+logger -check-expected
+
+# Terms may not consume the last event, which has to remain the clock
+design -reset
+logger -expect error ".*condition cannot be matched to any signal from the event list.*" 1
+read_slang <<EOF
+module amulti06(input logic rst_a, input logic rst_b,
+				input logic d, output logic q);
+	always @(negedge rst_a or negedge rst_b) begin
+		if (!rst_a || !rst_b)
+			q <= 0;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+logger -check-expected
+
+# A conjunction is no disjunction of events
+design -reset
+logger -expect error ".*condition cannot be matched to any signal from the event list.*" 1
+read_slang <<EOF
+module amulti07(input logic clk, input logic rst_a, input logic rst_b,
+				input logic d, output logic q);
+	always @(posedge clk or negedge rst_a or negedge rst_b) begin
+		if (!rst_a && !rst_b)
+			q <= 0;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+logger -check-expected
+
+# Edge mismatch on one of the terms is reported
+design -reset
+logger -expect error ".*polarity of condition doesn't match edge sensitivity.*" 1
+read_slang <<EOF
+module amulti08(input logic clk, input logic rst_a, input logic rst_b,
+				input logic d, output logic q);
+	always @(posedge clk or negedge rst_a or posedge rst_b) begin
+		if (!rst_a || !rst_b)
+			q <= 0;
+		else
+			q <= d;
+	end
+endmodule
+EOF
+logger -check-expected

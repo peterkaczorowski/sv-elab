@@ -25,6 +25,7 @@ endif()
 
 set(ALL_TESTS
     unit/async.ys
+    unit/async_multi.ys
     unit/dff.ys
     unit/dualedge.ys
     unit/function_call.ys

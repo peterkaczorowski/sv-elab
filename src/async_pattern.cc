@@ -229,6 +229,43 @@ static std::optional<AloadConditionValue> interpret_aload_condition(
 	return std::nullopt;
 }
 
+static bool is_single_bit_op(const ast::BinaryExpression &biop)
+{
+	return biop.left().type->getBitWidth() == 1 && biop.right().type->getBitWidth() == 1;
+}
+
+// Split a condition into a disjunction of single-signal terms. `negated`
+// requests the terms of the negation of `expr`, which lets `!(a && b)` be
+// handled as `!a || !b`.
+static bool interpret_aload_disjunction(EvalContext &eval, const ast::Expression &expr,
+		bool negated, std::vector<AloadConditionValue> &terms)
+{
+	if (expr.kind == ast::ExpressionKind::BinaryOp) {
+		auto &biop = expr.as<ast::BinaryExpression>();
+		bool is_or = biop.op == ast::BinaryOperator::LogicalOr ||
+					 (biop.op == ast::BinaryOperator::BinaryOr && is_single_bit_op(biop));
+		bool is_and = biop.op == ast::BinaryOperator::LogicalAnd ||
+					  (biop.op == ast::BinaryOperator::BinaryAnd && is_single_bit_op(biop));
+
+		if ((is_or && !negated) || (is_and && negated))
+			return interpret_aload_disjunction(eval, biop.left(), negated, terms) &&
+				   interpret_aload_disjunction(eval, biop.right(), negated, terms);
+	}
+
+	if (expr.kind == ast::ExpressionKind::UnaryOp) {
+		auto &unop = expr.as<ast::UnaryExpression>();
+		if (unop.op == ast::UnaryOperator::LogicalNot ||
+				(unop.op == ast::UnaryOperator::BitwiseNot && unop.type->getBitWidth() == 1))
+			return interpret_aload_disjunction(eval, unop.operand(), !negated, terms);
+	}
+
+	std::optional<AloadConditionValue> term = interpret_aload_condition(eval, expr);
+	if (!term)
+		return false;
+	terms.push_back(negated ? !*term : *term);
+	return true;
+}
+
 void TimingPatternInterpretor::interpret_async_pattern(const ast::ProceduralBlockSymbol &symbol,
 		std::vector<const ast::SignalEventControl *> triggers, const ast::Statement &body)
 {
@@ -289,34 +326,47 @@ void TimingPatternInterpretor::interpret_async_pattern(const ast::ProceduralBloc
 		}
 
 		auto &cond_stmt = stmt->as<ast::ConditionalStatement>();
-		std::optional<AloadConditionValue> condition =
-				interpret_aload_condition(eval, *cond_stmt.conditions[0].expr);
+		std::vector<AloadConditionValue> conditions;
+		bool matched = interpret_aload_disjunction(
+				eval, *cond_stmt.conditions[0].expr, /* negated= */ false, conditions);
 
-		if ((bool)condition) {
+		// Every term must match its own event, and one event must remain for the clock
+		std::vector<const ast::SignalEventControl *> remaining = triggers;
+		std::vector<AsyncTerm> terms;
+		for (size_t i = 0; matched && i < conditions.size(); i++) {
+			auto &condition = conditions[i];
 			auto found = std::find_if(
-					triggers.begin(), triggers.end(), [&](const ast::SignalEventControl *trigger) {
+					remaining.begin(), remaining.end(), [&](const ast::SignalEventControl *trigger) {
 						return eval.lhs(trigger->expr, /* silent= */ true) ==
-							   VariableBits(condition->signal);
+							   VariableBits(condition.signal);
 					});
 
-			if (found != triggers.end()) {
-				if ((*found)->iffCondition)
-					issuer.add_diag(diag::IffUnsupported, (*found)->iffCondition->sourceRange);
-
-				if ((*found)->edge !=
-						(condition->polarity ? ast::EdgeKind::PosEdge : ast::EdgeKind::NegEdge)) {
-					auto &diag = issuer.add_diag(
-							diag::IfElseAloadPolarity, cond_stmt.conditions[0].expr->sourceRange);
-					diag.addNote(diag::NoteSignalEvent, (*found)->sourceRange);
-					diag.addNote(diag::NoteDuplicateEdgeSense, timed.timing.sourceRange);
-					// We raised an error. Do infer the async load anyway
-				}
-
-				found_async.push_back({condition->signal, condition->polarity, cond_stmt.ifTrue});
-				triggers.erase(found);
-				stmt = cond_stmt.ifFalse;
-				continue;
+			if (found == remaining.end() || remaining.size() == 1) {
+				matched = false;
+				break;
 			}
+
+			if ((*found)->iffCondition)
+				issuer.add_diag(diag::IffUnsupported, (*found)->iffCondition->sourceRange);
+
+			if ((*found)->edge !=
+					(condition.polarity ? ast::EdgeKind::PosEdge : ast::EdgeKind::NegEdge)) {
+				auto &diag = issuer.add_diag(
+						diag::IfElseAloadPolarity, cond_stmt.conditions[0].expr->sourceRange);
+				diag.addNote(diag::NoteSignalEvent, (*found)->sourceRange);
+				diag.addNote(diag::NoteDuplicateEdgeSense, timed.timing.sourceRange);
+				// We raised an error. Do infer the async load anyway
+			}
+
+			terms.push_back({condition.signal, condition.polarity});
+			remaining.erase(found);
+		}
+
+		if (matched) {
+			found_async.push_back({std::move(terms), cond_stmt.ifTrue});
+			triggers = std::move(remaining);
+			stmt = cond_stmt.ifFalse;
+			continue;
 		}
 
 		auto &diag = issuer.add_diag(diag::IfElseAloadMismatch, stmt->sourceRange);

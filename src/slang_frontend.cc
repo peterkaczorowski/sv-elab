@@ -1886,10 +1886,11 @@ public:
 		ProcessTiming prologue_timing(ProcessTiming::EdgeTriggered);
 		{
 			prologue_timing.triggers.push_back({netlist.eval(clock.expr).as_net(), clock.edge == ast::EdgeKind::PosEdge, &clock});
-			for (auto &abranch : async)	{
-				ir::Value sig = netlist.convert_static(abranch.trigger);
+			for (auto &abranch : async)
+			for (auto &term : abranch.terms) {
+				ir::Value sig = netlist.convert_static(term.trigger);
 				assert_invariant(sig.size() == 1);
-				prologue_timing.triggers.push_back({sig.as_net(), abranch.polarity, nullptr});
+				prologue_timing.triggers.push_back({sig.as_net(), term.polarity, nullptr});
 			}
 		}
 		ProceduralContext prologue(netlist, prologue_timing);
@@ -1917,11 +1918,22 @@ public:
 		VariableBits driven;
 
 		for (auto &async_branch : async) {
-			ir::Value sig = netlist.convert_static(async_branch.trigger);
-			assert_invariant(sig.size() == 1);
+			assert_invariant(!async_branch.terms.empty());
+			ir::Value sig_depol;
+			for (auto &term : async_branch.terms) {
+				ir::Value term_sig = netlist.convert_static(term.trigger);
+				assert_invariant(term_sig.size() == 1);
+				ir::Value term_depol = term.polarity ? term_sig : netlist.LogicNot(term_sig);
+				sig_depol = sig_depol.size() ? netlist.LogicOr(sig_depol, term_depol) : term_depol;
+			}
+
+			// A single term keeps the event signal itself as the load trigger,
+			// several terms load on their active-high disjunction
+			bool single_term = async_branch.terms.size() == 1;
+			ir::Value sig = single_term ? netlist.convert_static(async_branch.terms[0].trigger) : sig_depol;
+			bool trigger_polarity = single_term ? async_branch.terms[0].polarity : true;
 
 			ProcessTiming branch_timing(ProcessTiming::Implicit);
-			ir::Value sig_depol = async_branch.polarity ? sig : netlist.LogicNot(sig);
 			branch_timing.background_enable = netlist.LogicAnd(netlist.LogicNot(prior_branch_taken), sig_depol);
 			prior_branch_taken.append(sig_depol);
 
@@ -1938,7 +1950,7 @@ public:
 			driven.append(branch.all_driven());
 
 			aloads.push_back({
-				sig.as_net(), async_branch.polarity, branch.vstate, &async_branch.body
+				sig.as_net(), trigger_polarity, branch.vstate, &async_branch.body
 			});
 			// TODO: check for non-constant load values and warn about sim/synth mismatch
 		}
@@ -2340,6 +2352,9 @@ public:
 			std::vector<BackendGraphBuilderBase::ParameterValue> params;
 			sym.body.visit(ast::makeVisitor(
 					[&](auto &, const ast::ParameterSymbol &symbol) {
+						// Local parameters cannot be overridden and are no cell parameters
+						if (symbol.isLocalParam())
+							return;
 						auto converted = netlist.convert_const(symbol.getValue(), symbol.location);
 						if (converted) {
 							params.push_back({std::string(symbol.name), *converted,
@@ -2352,9 +2367,6 @@ public:
 						netlist.add_diag(diag::BboxTypeParameter, symbol.location);
 					},
 					[&](auto &, const ast::InstanceSymbol &) {
-						// Local parameters cannot be overridden and are no cell parameters
-						if (symbol.isLocalParam())
-							return;
 						// no-op
 					}));
 
