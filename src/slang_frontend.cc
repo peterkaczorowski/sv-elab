@@ -2352,6 +2352,9 @@ public:
 						netlist.add_diag(diag::BboxTypeParameter, symbol.location);
 					},
 					[&](auto &, const ast::InstanceSymbol &) {
+						// Local parameters cannot be overridden and are no cell parameters
+						if (symbol.isLocalParam())
+							return;
 						// no-op
 					}));
 

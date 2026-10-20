@@ -1,0 +1,27 @@
+# Local parameters of a blackbox are no cell parameters. Gowin's ALU in the
+# target library declares ALU_MODE next to localparams ADD..MULT.
+read_slang --target gowin --family gw2a <<EOF
+module bb_localparam(input x, input y, input ci, output s, output co);
+	ALU #(.ALU_MODE(0)) u(.I0(x), .I1(y), .I3(1'b0), .CIN(ci), .COUT(co), .SUM(s));
+endmodule
+EOF
+hierarchy -top bb_localparam
+select -assert-count 1 bb_localparam/t:ALU
+select -assert-count 1 bb_localparam/t:ALU r:ALU_MODE %i
+select -assert-none bb_localparam/t:ALU r:MULT %i
+select -assert-none bb_localparam/t:ALU r:ADD %i
+
+# Same with a locally declared blackbox
+design -reset
+read_slang <<EOF
+(* blackbox *)
+module bb_lp_cell #(parameter P = 1)(input a, output y);
+	localparam L = P + 1;
+endmodule
+module bb_localparam2(input a, output y);
+	bb_lp_cell #(.P(3)) u(.a(a), .y(y));
+endmodule
+EOF
+hierarchy -top bb_localparam2
+select -assert-count 1 bb_localparam2/t:bb_lp_cell r:P=3 %i
+select -assert-none bb_localparam2/t:bb_lp_cell r:L %i
